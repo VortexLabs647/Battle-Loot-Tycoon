@@ -1,0 +1,10 @@
+{
+  "name": "battle-loot-multiplayer",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Starter WebSocket server for Battle Loot Tycoon",
+  "main": "server.js",
+  "scripts": {"start": "node server.js"},
+  "dependencies": {"ws": "^8.18.0"},
+  "engines": {"node": ">=20"}
+}
