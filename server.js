@@ -11,7 +11,12 @@ function findPublic(pid){return Object.entries(savedAccounts).find(([,a])=>a.pub
 function accountProfile(aid,acc){const online=onlineId(aid);return {publicId:publicId(acc),username:acc.username||'Player',level:acc.level||1,online:!!online,id:online||null}}
 function pendingSnapshot(aid){const a=savedAccounts[aid];return (a?.incoming||[]).map(pid=>{const found=findPublic(pid);return found?accountProfile(...found):null}).filter(Boolean)}
 function refreshDirectoryFriends(){updateFriends();for(const [id,p] of players)if(p.accountId)send(id,{type:'pending_friend_requests',requests:pendingSnapshot(p.accountId)})}
-// Migrate existing registered accounts to stable public directory identifiers.\nfor(const acc of Object.values(savedAccounts)){if(acc&&typeof acc==='object'&&acc.username&&acc.username!=='Player')publicId(acc)}\nsaveAccounts();\nfunction accountOf(id){return players.get(id)?.accountId}
+// Migrate existing registered accounts to stable public directory identifiers.
+for(const acc of Object.values(savedAccounts)){
+  if(acc&&typeof acc==='object'&&acc.username&&acc.username!=='Player')publicId(acc);
+}
+saveAccounts();
+function accountOf(id){return players.get(id)?.accountId}
 function onlineId(accountId){for(const [id,p] of players)if(p.accountId===accountId)return id;return null}
 function friendSnapshot(id){const aid=accountOf(id);const account=savedAccounts[aid];return (account?.friends||[]).map(fid=>({accountId:fid,publicId:savedAccounts[fid]?publicId(savedAccounts[fid]):'',id:onlineId(fid),username:savedAccounts[fid]?.username||'Player',level:savedAccounts[fid]?.level||1,online:!!onlineId(fid)}))}
 function updateFriends(){for(const id of players.keys())if(accountOf(id))send(id,{type:'friends_snapshot',friends:friendSnapshot(id)})}
