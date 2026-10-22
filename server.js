@@ -1,7 +1,15 @@
 'use strict';
-const http=require('http'),WebSocket=require('ws'),crypto=require('crypto');
+const http=require('http'),WebSocket=require('ws'),crypto=require('crypto'),fs=require('fs'),path=require('path');
 const PORT=Number(process.env.PORT)||10000;
 const players=new Map(),sockets=new Map(),friends=new Map(),requests=new Set(),invites=new Set(),offers=new Map();const rooms=new Map(),drops=new Map(),pendingDrops=new Map(),pendingPickups=new Map();
+const DATA_FILE=path.join(process.env.DATA_DIR||__dirname,'blt-friends.json');
+let savedAccounts={};
+try{savedAccounts=JSON.parse(fs.readFileSync(DATA_FILE,'utf8'))||{}}catch(e){if(e.code!=='ENOENT')console.warn('[friends] read failed',e.message)}
+function saveAccounts(){try{fs.mkdirSync(path.dirname(DATA_FILE),{recursive:true});const tmp=DATA_FILE+'.tmp';fs.writeFileSync(tmp,JSON.stringify(savedAccounts));fs.renameSync(tmp,DATA_FILE)}catch(e){console.error('[friends] save failed',e.message)}}
+function accountOf(id){return players.get(id)?.accountId}
+function onlineId(accountId){for(const [id,p] of players)if(p.accountId===accountId)return id;return null}
+function friendSnapshot(id){const aid=accountOf(id);const account=savedAccounts[aid];return (account?.friends||[]).map(fid=>({accountId:fid,id:onlineId(fid),username:savedAccounts[fid]?.username||'Player',online:!!onlineId(fid)}))}
+function updateFriends(){for(const id of players.keys())if(accountOf(id))send(id,{type:'friends_snapshot',friends:friendSnapshot(id)})}
 const server=http.createServer((req,res)=>{res.setHeader('Content-Type','application/json; charset=utf-8');res.setHeader('Access-Control-Allow-Origin','*');if(req.url==='/'||req.url==='/health'){res.writeHead(200);return res.end(JSON.stringify({status:'online',game:'Battle Loot Tycoon',players:players.size,features:['friends','base_visits','gun_gifts','ground_drops']}))}res.writeHead(404);res.end(JSON.stringify({error:'Not found'}))});
 const wss=new WebSocket.Server({server,maxPayload:65536});
 function send(id,data){const ws=sockets.get(id);if(ws?.readyState===WebSocket.OPEN)ws.send(JSON.stringify(data))}
@@ -32,10 +40,21 @@ wss.on('connection',ws=>{
  ws.on('message',raw=>{let m;try{m=JSON.parse(raw.toString())}catch{return}if(!m||typeof m!=='object')return;
  const to=m.to,from=m.from;if(['drop_request','drop_commit','pickup_request','base_enter','base_leave'].includes(m.type))console.log('[message]',id,m.type);
  switch(m.type){
- case 'set_username':{const username=String(m.username||'').trim();if(!usernameAllowed(username))return err(id,'Username not allowed. Choose a different name (3–18 letters, numbers, or underscores).');player.username=username;broadcast({type:'player_updated',player});break}
+ case 'account_hello':{
+ const aid=String(m.accountId||'');
+ if(!/^[a-f0-9]{32,64}$/.test(aid))return err(id,'Invalid account identity');
+ if(player.accountId&&player.accountId!==aid)return err(id,'Account already initialized');
+ player.accountId=aid;
+ const acc=savedAccounts[aid]||(savedAccounts[aid]={username:'Player',friends:[]});
+ if(!Array.isArray(acc.friends))acc.friends=[];
+ if(usernameAllowed(m.username))acc.username=m.username;
+ player.username=acc.username;
+ for(const fid of acc.friends){const peer=onlineId(fid);if(peer){friends.get(id).add(peer);friends.get(peer)?.add(id)}}
+ saveAccounts();send(id,{type:'player_updated',player});broadcast({type:'player_updated',player},id);updateFriends();break}
+ case 'set_username':{const username=String(m.username||'').trim();if(!usernameAllowed(username))return err(id,'Username not allowed. Choose a different name (3–18 letters, numbers, or underscores).');player.username=username;if(player.accountId){savedAccounts[player.accountId].username=username;saveAccounts();updateFriends()}broadcast({type:'player_updated',player});break}
  case 'move':{if(Date.now()-lastMove<50)return;lastMove=Date.now();if(!['x','y','z'].every(k=>Number.isFinite(m[k])&&Math.abs(m[k])<100000))return;Object.assign(player,{x:m.x,y:m.y,z:m.z});broadcast({type:'player_moved',id,x:player.x,y:player.y,z:player.z},id);break}
  case 'friend_request':{if(!connected(to)||to===id)return err(id,'Player is offline');if(isFriend(id,to))return;requests.add(id+':'+to);send(to,{type:'friend_request',from:id,player});break}
- case 'friend_accept':{if(!connected(from)||!requests.has(from+':'+id))return err(id,'Friend request expired');requests.delete(from+':'+id);friends.get(id).add(from);friends.get(from).add(id);send(id,{type:'friend_added',id:from});send(from,{type:'friend_added',id});break}
+ case 'friend_accept':{if(!connected(from)||!requests.has(from+':'+id))return err(id,'Friend request expired');requests.delete(from+':'+id);friends.get(id).add(from);friends.get(from).add(id);const a=accountOf(id),b=accountOf(from);if(a&&b&&a!==b){for(const [x,y] of [[a,b],[b,a]]){const f=savedAccounts[x].friends;if(!f.includes(y))f.push(y)}saveAccounts()}updateFriends();send(id,{type:'friend_added',id:from});send(from,{type:'friend_added',id});break}
  case 'base_invite':{if(!connected(to)||!isFriend(id,to))return err(id,'Invite a connected friend');invites.add(id+':'+to);send(to,{type:'base_invite',from:id,player});break}
  case 'base_visit':{if(!connected(to)||!invites.has(to+':'+id)||!isFriend(id,to))return err(id,'Base invitation expired');invites.delete(to+':'+id);send(to,{type:'base_snapshot_request',from:id});break}
  case 'base_snapshot':{if(!connected(to)||!isFriend(id,to)||!validPieces(m.pieces))return err(id,'Invalid base data');send(to,{type:'base_snapshot',username:player.username,pieces:m.pieces,hostId:id});break}
@@ -55,7 +74,7 @@ wss.on('connection',ws=>{
  case 'gift_receipt':{const o=offers.get(m.offerId);if(!o||o.to!==id||o.stage!=='delivering')return;offers.delete(m.offerId);if(m.ok)send(o.from,{type:'gift_delivered'});else send(o.from,{type:'gift_refund',gun:o.gun});break}
  }
  });
- ws.on('close',()=>{const oldRoom=rooms.get(id);rooms.delete(id);if(oldRoom)for(const [pid,r] of rooms)if(r===oldRoom)send(pid,{type:'base_player_left',id});for(const [ticket,p] of pendingDrops)if(p.owner===id)pendingDrops.delete(ticket);for(const [ticket,p] of pendingPickups)if(p.to===id){pendingPickups.delete(ticket);console.warn('[pickup] unconfirmed delivery expired; not respawning to prevent duplication',ticket)}players.delete(id);sockets.delete(id);for(const [pid,host] of rooms)if(host===id){rooms.delete(pid);send(pid,{type:'base_drops',drops:[]});send(pid,{type:'base_players',players:[]})}friends.delete(id);for(const f of friends.values())f.delete(id);for(const k of [...requests])if(k.startsWith(id+':')||k.endsWith(':'+id))requests.delete(k);for(const k of [...invites])if(k.startsWith(id+':')||k.endsWith(':'+id))invites.delete(k);for(const [offerId,o] of offers){if(o.from===id||o.to===id){offers.delete(offerId);if(o.stage==='delivering'&&o.from!==id)send(o.from,{type:'gift_refund',gun:o.gun});}}broadcast({type:'player_left',id})});ws.on('error',e=>console.error('WebSocket error:',e.message));
+ ws.on('close',()=>{const oldRoom=rooms.get(id);rooms.delete(id);if(oldRoom)for(const [pid,r] of rooms)if(r===oldRoom)send(pid,{type:'base_player_left',id});for(const [ticket,p] of pendingDrops)if(p.owner===id)pendingDrops.delete(ticket);for(const [ticket,p] of pendingPickups)if(p.to===id){pendingPickups.delete(ticket);console.warn('[pickup] unconfirmed delivery expired; not respawning to prevent duplication',ticket)}players.delete(id);sockets.delete(id);for(const [pid,host] of rooms)if(host===id){rooms.delete(pid);send(pid,{type:'base_drops',drops:[]});send(pid,{type:'base_players',players:[]})}friends.delete(id);for(const f of friends.values())f.delete(id);updateFriends();for(const k of [...requests])if(k.startsWith(id+':')||k.endsWith(':'+id))requests.delete(k);for(const k of [...invites])if(k.startsWith(id+':')||k.endsWith(':'+id))invites.delete(k);for(const [offerId,o] of offers){if(o.from===id||o.to===id){offers.delete(offerId);if(o.stage==='delivering'&&o.from!==id)send(o.from,{type:'gift_refund',gun:o.gun});}}broadcast({type:'player_left',id})});ws.on('error',e=>console.error('WebSocket error:',e.message));
 });
 setInterval(()=>{const now=Date.now();for(const [ticket,p] of pendingDrops)if(now-p.time>15000)pendingDrops.delete(ticket);for(const [ticket,p] of pendingPickups)if(now-p.time>15000){pendingPickups.delete(ticket);console.warn('[pickup] unconfirmed delivery expired; not respawning to prevent duplication',ticket)}},5000);
 server.listen(PORT,'0.0.0.0',()=>console.log('Battle Loot multiplayer listening on '+PORT));
