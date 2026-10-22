@@ -6,9 +6,14 @@ const DATA_FILE=path.join(process.env.DATA_DIR||__dirname,'blt-friends.json');
 let savedAccounts={};
 try{savedAccounts=JSON.parse(fs.readFileSync(DATA_FILE,'utf8'))||{}}catch(e){if(e.code!=='ENOENT')console.warn('[friends] read failed',e.message)}
 function saveAccounts(){try{fs.mkdirSync(path.dirname(DATA_FILE),{recursive:true});const tmp=DATA_FILE+'.tmp';fs.writeFileSync(tmp,JSON.stringify(savedAccounts));fs.renameSync(tmp,DATA_FILE)}catch(e){console.error('[friends] save failed',e.message)}}
-function accountOf(id){return players.get(id)?.accountId}
+function publicId(acc){if(!acc.publicId)acc.publicId=crypto.randomUUID();return acc.publicId}
+function findPublic(pid){return Object.entries(savedAccounts).find(([,a])=>a.publicId===pid)}
+function accountProfile(aid,acc){const online=onlineId(aid);return {publicId:publicId(acc),username:acc.username||'Player',level:acc.level||1,online:!!online,id:online||null}}
+function pendingSnapshot(aid){const a=savedAccounts[aid];return (a?.incoming||[]).map(pid=>{const found=findPublic(pid);return found?accountProfile(...found):null}).filter(Boolean)}
+function refreshDirectoryFriends(){updateFriends();for(const [id,p] of players)if(p.accountId)send(id,{type:'pending_friend_requests',requests:pendingSnapshot(p.accountId)})}
+// Migrate existing registered accounts to stable public directory identifiers.\nfor(const acc of Object.values(savedAccounts)){if(acc&&typeof acc==='object'&&acc.username&&acc.username!=='Player')publicId(acc)}\nsaveAccounts();\nfunction accountOf(id){return players.get(id)?.accountId}
 function onlineId(accountId){for(const [id,p] of players)if(p.accountId===accountId)return id;return null}
-function friendSnapshot(id){const aid=accountOf(id);const account=savedAccounts[aid];return (account?.friends||[]).map(fid=>({accountId:fid,id:onlineId(fid),username:savedAccounts[fid]?.username||'Player',level:savedAccounts[fid]?.level||1,online:!!onlineId(fid)}))}
+function friendSnapshot(id){const aid=accountOf(id);const account=savedAccounts[aid];return (account?.friends||[]).map(fid=>({accountId:fid,publicId:savedAccounts[fid]?publicId(savedAccounts[fid]):'',id:onlineId(fid),username:savedAccounts[fid]?.username||'Player',level:savedAccounts[fid]?.level||1,online:!!onlineId(fid)}))}
 function updateFriends(){for(const id of players.keys())if(accountOf(id))send(id,{type:'friends_snapshot',friends:friendSnapshot(id)})}
 const server=http.createServer((req,res)=>{res.setHeader('Content-Type','application/json; charset=utf-8');res.setHeader('Access-Control-Allow-Origin','*');if(req.url==='/'||req.url==='/health'){res.writeHead(200);return res.end(JSON.stringify({status:'online',game:'Battle Loot Tycoon',players:players.size,features:['friends','base_visits','gun_gifts','ground_drops']}))}res.writeHead(404);res.end(JSON.stringify({error:'Not found'}))});
 const wss=new WebSocket.Server({server,maxPayload:65536});
@@ -46,13 +51,41 @@ wss.on('connection',ws=>{
  if(player.accountId&&player.accountId!==aid)return err(id,'Account already initialized');
  player.accountId=aid;
  const acc=savedAccounts[aid]||(savedAccounts[aid]={username:'Player',friends:[]});
- if(!Array.isArray(acc.friends))acc.friends=[];
+ if(!Array.isArray(acc.friends))acc.friends=[];if(!Array.isArray(acc.incoming))acc.incoming=[];publicId(acc);
  if(usernameAllowed(m.username))acc.username=m.username;
  player.username=acc.username;player.level=Math.max(1,Math.min(9999,Math.floor(Number(m.level)||acc.level||1)));acc.level=player.level;
  for(const fid of acc.friends){const peer=onlineId(fid);if(peer){friends.get(id).add(peer);friends.get(peer)?.add(id)}}
- saveAccounts();send(id,{type:'player_updated',player});broadcast({type:'player_updated',player},id);updateFriends();break}
+ saveAccounts();send(id,{type:'player_updated',player});broadcast({type:'player_updated',player},id);refreshDirectoryFriends();break}
  case 'set_level':{const lv=Math.floor(Number(m.level));if(!Number.isFinite(lv)||lv<1||lv>9999)return;player.level=lv;if(player.accountId&&savedAccounts[player.accountId]){savedAccounts[player.accountId].level=lv;saveAccounts();updateFriends()}broadcast({type:'player_updated',player});break}
  case 'set_username':{const username=String(m.username||'').trim();if(!usernameAllowed(username))return err(id,'Username not allowed. Choose a different name (3–18 letters, numbers, or underscores).');player.username=username;if(player.accountId){savedAccounts[player.accountId].username=username;saveAccounts();updateFriends()}broadcast({type:'player_updated',player});break}
+  case 'directory_search':{
+   if(!player.accountId)return err(id,'Connect your account first');
+   const query=String(m.query||'').trim().toLowerCase().slice(0,18);
+   if(query.length<2)return send(id,{type:'directory_results',query,players:[]});
+   const matches=Object.entries(savedAccounts).filter(([aid,a])=>aid!==player.accountId&&usernameAllowed(a.username)&&a.username.toLowerCase().includes(query)).slice(0,30).map(([aid,a])=>accountProfile(aid,a));
+   send(id,{type:'directory_results',query,players:matches});break}
+  case 'offline_friend_request':{
+   const sender=savedAccounts[player.accountId],found=findPublic(String(m.publicId||''));
+   if(!sender||!found||found[0]===player.accountId)return err(id,'Player not found');
+   const [aid,target]=found;
+   if((sender.friends||[]).includes(aid))return err(id,'Already friends');
+   if(!Array.isArray(target.incoming))target.incoming=[];
+   const pid=publicId(sender);
+   if(!target.incoming.includes(pid))target.incoming.push(pid);
+   saveAccounts();
+   const peer=onlineId(aid);if(peer)send(peer,{type:'pending_friend_requests',requests:pendingSnapshot(aid)});
+   send(id,{type:'offline_friend_sent',publicId:m.publicId});break}
+  case 'offline_friend_accept':{
+   const recipient=savedAccounts[player.accountId],found=findPublic(String(m.publicId||''));
+   if(!recipient||!found||!recipient.incoming?.includes(m.publicId))return err(id,'Friend request no longer available');
+   const [senderId,sender]=found;
+   recipient.incoming=recipient.incoming.filter(x=>x!==m.publicId);
+   if(!recipient.friends.includes(senderId))recipient.friends.push(senderId);
+   if(!Array.isArray(sender.friends))sender.friends=[];
+   if(!sender.friends.includes(player.accountId))sender.friends.push(player.accountId);
+   const senderOnline=onlineId(senderId);
+   if(senderOnline){friends.get(id)?.add(senderOnline);friends.get(senderOnline)?.add(id)}
+   saveAccounts();refreshDirectoryFriends();break}
  case 'move':{if(Date.now()-lastMove<50)return;lastMove=Date.now();if(!['x','y','z'].every(k=>Number.isFinite(m[k])&&Math.abs(m[k])<100000))return;Object.assign(player,{x:m.x,y:m.y,z:m.z});broadcast({type:'player_moved',id,x:player.x,y:player.y,z:player.z},id);break}
  case 'friend_request':{if(!connected(to)||to===id)return err(id,'Player is offline');if(isFriend(id,to))return;requests.add(id+':'+to);send(to,{type:'friend_request',from:id,player});break}
  case 'friend_accept':{if(!connected(from)||!requests.has(from+':'+id))return err(id,'Friend request expired');requests.delete(from+':'+id);friends.get(id).add(from);friends.get(from).add(id);const a=accountOf(id),b=accountOf(from);if(a&&b&&a!==b){for(const [x,y] of [[a,b],[b,a]]){const f=savedAccounts[x].friends;if(!f.includes(y))f.push(y)}saveAccounts()}updateFriends();send(id,{type:'friend_added',id:from});send(from,{type:'friend_added',id});break}
