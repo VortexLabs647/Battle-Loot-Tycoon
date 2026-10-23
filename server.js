@@ -32,7 +32,7 @@ function usernameAllowed(value){
   if(severe.some(w=>condensed.includes(w)))return false;
   return true;
 }
-function safeGun(g){return g&&typeof g.id==='string'&&['scrap','cobalt','thorn','specter','halloween','nova','voidstar'].includes(g.id)&&Array.isArray(g.perks)&&g.perks.length<=4&&g.perks.every(p=>['redstone','dark','plasma','fire'].includes(p))}
+function safeGun(g){return g&&typeof g.id==='string'&&['scrap','cobalt','thorn','specter','halloween','nova','void','voidstar'].includes(g.id)&&Array.isArray(g.perks)&&g.perks.length<=4&&g.perks.every(p=>['redstone','dark','plasma','fire'].includes(p))}
 function validPieces(p){if(!p||typeof p!=='object'||Array.isArray(p)||Object.keys(p).length>576)return false;return Object.entries(p).every(([k,v])=>/^([1-9]|1[0-9]|2[0-2]),([1-9]|1[0-9]|2[0-2])$/.test(k)&&v&&typeof v==='object'&&!Array.isArray(v)&&Object.keys(v).length<=12)}
 wss.on('connection',ws=>{
  const id=crypto.randomUUID(),player={id,username:'Player',x:0,y:0,z:0};players.set(id,player);sockets.set(id,ws);friends.set(id,new Set());
