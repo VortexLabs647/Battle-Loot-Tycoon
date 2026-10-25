@@ -6,6 +6,7 @@ const DB_FILE=process.env.BLT_ACCOUNT_FILE||path.join(process.env.BLT_DATA_DIR||
 let db={accounts:{},requests:{}};try{const old=JSON.parse(fs.readFileSync(DB_FILE,'utf8'));if(old&&typeof old==='object')db={accounts:old.accounts||{},requests:old.requests||{}}}catch(e){if(e.code!=='ENOENT')console.warn('Account storage read failed',e.message)}
 function saveDB(){try{fs.mkdirSync(path.dirname(DB_FILE),{recursive:true});const tmp=DB_FILE+'.tmp';fs.writeFileSync(tmp,JSON.stringify(db));fs.renameSync(tmp,DB_FILE)}catch(e){console.error('Account storage save failed',e.message)}}
 // Party and map presence are ephemeral: never modify or reset persisted account data.
+const sessionAccounts=new Map();
 const partyLeader=new Map(),partyInvites=new Map(),mapPresence=new Map();
 function partyMembers(leader){return [...partyLeader].filter(([id,l])=>l===leader&&connected(id)).map(([id])=>id)}
 function partySnapshot(leader){for(const id of partyMembers(leader))send(id,{type:'party_snapshot',leader,members:partyMembers(leader).map(pid=>({id:pid,username:players.get(pid)?.username||'Player'}))})}
